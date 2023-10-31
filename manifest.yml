@@ -1,0 +1,33 @@
+modules:
+  webtrigger:
+    - key: snipe-api-webtrigger-update-custom-field
+      function: updateCustomField
+    - key: accessories-snipe-webtrigger
+      function: accessoriesSnipe
+    - key: log-jira-payload-webtrigger   
+      function: logJiraPayload
+
+  function:
+    - key: updateCustomField
+      handler: index.updateCustomField
+    - key: accessoriesSnipe
+      handler: index.accessoriesSnipe
+    - key: logJiraPayload                
+      handler: index.logJiraPayload
+
+app:
+  id: ari:cloud:ecosystem::app/e6a5a040-67b4-4c17-94bf-51fb5a9c5de5
+
+permissions:
+  external:
+    fetch:
+      backend:
+        - https://vinted.snipe-it.io/api/v1/*
+        - https://vinted.atlassian.net/*
+  scopes:
+    - manage:jira-configuration
+    - read:field.option:jira
+    - read:jira-work
+    - write:jira-work
+    - read:jira-user
+    - write:comment:jira
