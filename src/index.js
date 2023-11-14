@@ -1,14 +1,17 @@
-import { logger } from './logger';
+import {
+    logger
+} from './logger';
 
-// API-related imports
-import { 
+import {
     fetchCompanies,
     fetchLocations,
-     fetchAccessories,
-      createCompanyInSnipeIT,
-       createLocationInSnipeIT } from './api';
+    createCompanyInSnipeIT,
+    createLocationInSnipeIT,
+    fetchCheckedOutAccessoryUsers,
+    checkinAccessory
 
-// Utils-related imports
+} from './api';
+
 import {
     customFieldCategories,
     fetchSnipeITUser,
@@ -18,106 +21,118 @@ import {
     processStockAccessory,
     synchronizeFieldWithOptions,
     getExactAccessory,
-    
+    fetchAndLogUserAccessories,
+    clearUserAccessoriesCache,
+    convertToSustainableAndCheckIn
 } from './utils';
 
-// Response-related imports
-import { buildOutput, buildLogSummaryResponse } from './responseBuilder';
+import {
+    buildOutput,
+    buildLogSummaryResponse
+} from './responseBuilder';
 
-
-// Update Custom Fields for Accessories in Jira based on Snipe-IT Acessory list
 export const updateCustomField = async () => {
     const updateTasks = Object.entries(customFieldCategories).map(
         ([fieldId, categoryName]) => synchronizeFieldWithOptions(fieldId, categoryName)
     );
     const results = await Promise.all(updateTasks);
-    logger.debug(buildOutput(results))
     logger.info("Field Update operation completed successfully.");
     return buildOutput(results);
 };
 
 export const accessoriesSnipe = async (request) => {
-    // Initialize the logger's summary
-    logger.initializeSummary();
 
     try {
         const jiraData = JSON.parse(request.body);
-        logger.debug("Received JiraData:", JSON.stringify(jiraData));
-
-        var issueUrl = jiraData.issueUrl;
-
-        var locationName = jiraData.customfield_11213;
-        logger.debug(locationName)
-
+        logger.debug(`Received JIRA payload: ${JSON.stringify(jiraData)}`);
+        const issueUrl = jiraData.issueUrl;
+        const locationName = jiraData.customfield_11213;
         const snipeITUser = await fetchSnipeITUser(jiraData.reporterEmail);
-
-        let locationMapping = await fetchLocations(process.env.SNIPE_IT_TOKEN);
-        logger.debug("Location Mapping: ", locationMapping);
-
-        let companyMapping = await fetchCompanies(process.env.SNIPE_IT_TOKEN);
-        logger.debug("Company Mapping: ", companyMapping);
-
+        let locationMapping = await fetchLocations(process.env.SNIPE_TOKEN);
+        let companyMapping = await fetchCompanies(process.env.SNIPE_TOKEN);
         let locationId = locationMapping[jiraData.customfield_11213];
-        if (!locationId) {
-            logger.warn(`Location "${jiraData.customfield_11213}" not found. Creating in Snipe-IT...`);
-            const newLocation = await createLocationInSnipeIT(jiraData.customfield_11213, process.env.SNIPE_IT_TOKEN);
-            locationId = newLocation.id;
-            locationMapping[jiraData.customfield_11213] = locationId;
-        }
-        logger.debug("Extracted locationId from mapping:", locationId);
-
         let companyId = companyMapping[jiraData.customfield_11337];
-        if (!companyId) {
-            logger.warn(`Company "${jiraData.customfield_11337}" not found. Creating in Snipe-IT...`);
-            const newCompany = await createCompanyInSnipeIT(jiraData.customfield_11337, process.env.SNIPE_IT_TOKEN);
-            companyId = newCompany.id;
-            companyMapping[jiraData.customfield_11337] = companyId;
-        }
-        logger.debug("Extracted companyId from mapping:", companyId);
 
-        logger.debug("Jira location name: ", jiraData.customfield_11213);
-        logger.debug("Jira company name: ", jiraData.customfield_11337);
-        const accessoryFields = getCustomFieldIds();
+        // Check if location exists, if not, create a new one
+        if (!locationId) {
+            logger.warn(`Location "${locationName}" not found. Creating in Snipe-IT...`);
+            const newLocation = await createLocationInSnipeIT(locationName, process.env.SNIPE_TOKEN);
+            locationId = newLocation.id;
+            locationMapping[locationName] = locationId;
+        }
+
+        // Check if company exists, if not, create a new one
+        if (!companyId) {
+            const companyName = jiraData.customfield_11337;
+            logger.warn(`Company "${companyName}" not found. Creating in Snipe-IT...`);
+            const newCompany = await createCompanyInSnipeIT(companyName, process.env.SNIPE_TOKEN);
+            companyId = newCompany.id;
+            companyMapping[companyName] = companyId;
+        }
+
+        const accessoryFields = getCustomFieldIds() || [];
         const accessoryNames = getAccessoryNamesFromPayload(jiraData, accessoryFields);
-        logger.debug("Accessories to process:", accessoryNames);
-        
-        let shouldContinueProcessing = true;
+        logger.info('Accessories assigned to ', JSON.stringify(jiraData.reporterEmail), 'in Snipe-IT BEFORE automation:');
+        await fetchAndLogUserAccessories(snipeITUser);
 
         for (const accessoryName of accessoryNames) {
-            logger.debug(`Processing accessory: ${accessoryName}`);
-            const accessory = await getExactAccessory(accessoryName, locationId, locationName);            
+            const accessory = await getExactAccessory(accessoryName, locationId, locationName);
+
+            if (!accessory && jiraData.customfield_11745 !== 'New Accessory') {
+                logger.error(`Accessory ${accessoryName} not found in Snipe-IT for location ${locationName}.`);
+                continue; // Skip to the next iteration if accessory is not found and not creating a new one
+            }
+
             switch (jiraData.customfield_11745) {
                 case 'Stock Accessory':
-                    if (!accessory) {
-                        logger.error(`Stock Accessory ${accessoryName} not found in Snipe-IT for location ${locationName}. Consider adding it first.`);
-                        logger.incrementErrorCount(); 
-                        continue;
-                    }
-                    logger.debug(`About to checkout accessory: ${accessoryName} with current stock: ${accessory.qty}`);
+                    logger.debug(`Processing Stock Accessory: ${accessoryName}`);
                     await processStockAccessory(accessory, snipeITUser, jiraData, locationId, locationMapping, issueUrl, locationName);
-                    logger.debug(`Successfully processed stock accessory: ${accessoryName}`);
                     break;
                 case 'New Accessory':
-                    logger.debug("Before calling processNewAccessory - locationId:", locationId);
-                    logger.debug("Before calling processNewAccessory - companyId:", companyId);
-                    shouldContinueProcessing = await processNewAccessory(accessory, snipeITUser, jiraData, locationId, companyId, issueUrl, locationName);
-                    logger.debug(`Should continue after processing ${accessoryName}:`, shouldContinueProcessing);
-                    if (!shouldContinueProcessing) {
-                        break; // Exit the switch case
+                    logger.debug(`Processing New Accessory: ${accessoryName}, existing: ${!!accessory}`);
+                    const isNewAccessoryProcessed = accessory
+                        ? await processNewAccessory(accessory, snipeITUser, jiraData, locationId, companyId, issueUrl, locationName)
+                        : await processNewAccessory(null, snipeITUser, jiraData, locationId, companyId, issueUrl, locationName);
+                    if (!isNewAccessoryProcessed) {
+                        logger.error(`Failed to process new accessory ${accessoryName}, isNewAccessoryProcessed: ${isNewAccessoryProcessed}`);
+                    }
+                    break;
+                case '(DO NOT USE) Return Accessory':
+                    const checkedOutAccessoriesResponse = await fetchCheckedOutAccessoryUsers(accessory.id);
+                    const accessoryToCheckIn = checkedOutAccessoriesResponse.rows.find(acc => acc.username === jiraData.reporterEmail);
+
+                    if (!accessoryToCheckIn) {
+                        logger.error(`Accessory ${accessoryName} not found as checked out to username ${jiraData.reporterEmail}.`);
+                        continue; // Skip to the next iteration if no checked-out accessory entry is found
+                    }
+
+                    // Perform the check-in action
+                    await checkinAccessory(accessoryToCheckIn.assigned_pivot_id);
+                    logger.info(`Accessory ${accessoryName} with pivot ID ${accessoryToCheckIn.assigned_pivot_id} successfully checked in.`);
+
+                    // Now convert the checked-in accessory to a sustainable accessory and update the stock
+                    try {
+                        const originalAccessoryName = accessoryName.replace(" (Sustainable)", ""); // Remove the suffix if it's there
+                        await convertToSustainableAndCheckIn(originalAccessoryName, locationId, locationName);
+                    } catch (error) {
+                        logger.error(`Failed to convert ${accessoryName} to sustainable: ${error}`);
+                        continue; // Skip to the next iteration if conversion to sustainable fails
                     }
                     break;
                 default:
-                    throw new Error('Invalid accessory type in customfield_11745');
-            }
-            if (!shouldContinueProcessing) {
-                break;
+                    logger.error('Invalid accessory type in customfield_11745:', jiraData.customfield_11745);
+                    continue; // Skip to the next iteration if the accessory type is invalid
             }
         }
-        
+        logger.debug("Clearing user accessories cache.");
+        clearUserAccessoriesCache();
+        logger.info('Accessories assigned to ', JSON.stringify(jiraData.reporterEmail), 'in Snipe-IT AFTER automation:');
+        await fetchAndLogUserAccessories(snipeITUser);
         logger.info("Completed processing all accessories");
+
         return buildLogSummaryResponse();
     } catch (error) {
-        logger.error('Error:', error.message);
+        logger.error(`Error in accessoriesSnipe function: ${error.message}`);
         return buildOutput({ error: error.message });
     }
 };
@@ -126,38 +141,38 @@ export const accessoriesSnipe = async (request) => {
 
 export const logJiraPayload = async (request) => {
     try {
-        // 1. Log the Jira Payload
         const jiraData = JSON.parse(request.body);
-        logger.debug("Received Jira Payload:", jiraData);
-        
-        // 2. Inspect the accessory structure
-        const inspectAccessoryStructure = async () => {
-            try {
-                logger.debug("Fetching all accessories from Snipe-IT for inspection...");
-                const allAccessories = await fetchAccessories(process.env.SNIPE_IT_TOKEN);
-                
-                const testHeadphones = allAccessories.rows.find(item => item.name === "Test Headphones");
-        
-                if (testHeadphones) {
-                    logger.debug("Test Headphones Accessory Data Structure:", JSON.stringify(testHeadphones, null, 2));
-                } else {
-                    logger.error("Test Headphones accessory not found in fetched data.");
-                }
-            } catch (error) {
-                logger.error("Error fetching and inspecting accessory structure:", error);
-            }
-        };
-        await inspectAccessoryStructure();
+        const snipeITUser = await fetchSnipeITUser(jiraData.reporterEmail);
+        if (!snipeITUser) {
+            logger.error(`User with email ${jiraData.reporterEmail} not found in Snipe-IT.`);
+            return buildOutput({ error: `User with email ${jiraData.reporterEmail} not found in Snipe-IT.` });
+        }
 
-        
+        // Instead of fetching all user accessories, fetch the accessories that are checked out to the user
+        const response = await fetchCheckedOutAccessoryUsers(snipeITUser.id);
 
-        logger.info("logJiraPayload operation completed successfully.");
-    return buildOutput({ "Action": "Payload Logged and Accessory Inspected" });
+        if (response.status === 'error') {
+            logger.error(`Error fetching checked-out accessories: ${response.messages}`);
+            return buildOutput({ error: `Error fetching checked-out accessories: ${response.messages}` });
+        }
+
+        const checkedOutAccessories = response.rows;
+        if (checkedOutAccessories && checkedOutAccessories.length > 0) {
+            const accessoriesSummary = checkedOutAccessories.map(acc => {
+                return { assigned_pivot_id: acc.assigned_pivot_id, name: acc.name, last_checkout: acc.last_checkout };
+            });
+            return buildOutput({ "Action": "Checked Out Accessories Fetched", "Count": accessoriesSummary.length, "Accessories": accessoriesSummary });
+        } else {
+            logger.warn(`No checked-out accessories found for user ID ${snipeITUser.id}`);
+            return buildOutput({ "Action": "No Checked Out Accessories Found", "Count": 0 });
+        }
     } catch (error) {
         logger.error('Error:', error.message);
         return buildOutput({ error: error.message });
     }
 };
+
+
 
 
 
