@@ -15,40 +15,41 @@ import { logger } from './logger';
 export const SNIPE_IT_BASE_URL = "https://vinted.snipe-it.io/api/v1";
 
 export const createNewAccessory = async (name, locationId, companyId, categoryId) => {
+    if (!name || !locationId || !companyId || !categoryId) {
+        const errorMessage = `Missing required parameters to create accessory. 
+        Name: ${name}, Location ID: ${locationId}, 
+        Company ID: ${companyId}, Category ID: ${categoryId}`;
+        logger.error(errorMessage);
+        return { status: 'error', message: errorMessage };
+    }
+
+    const requestBody = JSON.stringify({ name, qty: 1, category_id: categoryId, location_id: locationId, company_id: companyId });
+    const requestOptions = {
+        method: 'POST',
+        headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${process.env.SNIPE_IT_TOKEN}`,
+            'Content-Type': 'application/json'
+        },
+        body: requestBody
+    };
+
     try {
-        logger.debug(`Attempting to create accessory with Name: ${name}, LocationId: ${locationId}, CompanyId: ${companyId}, CategoryId: ${categoryId}`);
-        
-        if (!companyId || !categoryId) {
-            const errorMessage = `Cannot create accessory '${name}' without a valid CompanyId and CategoryId.`;
-            logger.error(errorMessage);
-            return { status: 'error', message: errorMessage };
-        }
-
-        const options = {
-            method: 'POST',
-            headers: defaultHeaders,
-            body: JSON.stringify({
-                name: name,
-                qty: 1,
-                category_id: categoryId,
-                location_id: locationId,
-                company_id: companyId
-            })
-        };
-
-        const response = await fetch(`${SNIPE_IT_BASE_URL}/accessories`, options);
+        const response = await fetch(`${SNIPE_IT_BASE_URL}/accessories`, requestOptions);
         const responseData = await response.json();
 
-        if (!response.ok) {
-            logger.error(`Failed to create accessory '${name}': ${responseData.error}`);
-            return { status: 'error', message: responseData.error };
+        // Check for success status in the nested responseData
+        if (response.ok && responseData.status === 'success' && responseData.payload && responseData.payload.id) {
+            logger.info(`Accessory '${name}' created successfully with ID: ${responseData.payload.id}`);
+            return { status: 'success', payload: responseData.payload };
+        } else {
+            // If the response is ok but the structure is not as expected, log the unexpected structure
+            logger.error(`Failed to create accessory '${name}', unexpected response structure: ${JSON.stringify(responseData)}`);
+            return { status: 'error', message: 'Unexpected response structure' };
         }
-
-        logger.info(`Accessory '${name}' created successfully with ID: ${responseData.id}`);
-        return { status: 'success', payload: responseData };
     } catch (error) {
-        logger.error(`Exception when creating accessory '${name}': ${error.message}`);
-        return { status: 'error', message: error.message };
+        logger.error(`Exception when creating accessory '${name}': ${error}`);
+        return { status: 'error', message: error.toString() };
     }
 };
 
@@ -144,6 +145,17 @@ export async function fetchAccessoriesByName(token, accessoryName) {
 
 // Update Accessory Quantity
 export const updateAccessoryQuantityInSnipeIT = async (accessoryId, newQuantity) => {
+    // Log the incoming quantity
+    logger.debug(`Received request to update quantity for accessory ID ${accessoryId} to ${newQuantity}`);
+
+    // Check if newQuantity is a number and not NaN
+    if (typeof newQuantity !== 'number' || isNaN(newQuantity)) {
+        const errorMessage = `Invalid newQuantity passed for accessory ID ${accessoryId}: ${newQuantity}`;
+        logger.error(errorMessage);
+        throw new Error(errorMessage);
+    }
+
+    // If validation passes, proceed with the update
     logger.debug(`Updating quantity for accessory ID ${accessoryId} to ${newQuantity}`);
     const options = {
         method: 'PATCH',
@@ -167,6 +179,7 @@ export const updateAccessoryQuantityInSnipeIT = async (accessoryId, newQuantity)
     logger.debug(`Accessory quantity updated successfully for ID ${accessoryId}: ${JSON.stringify(responseData)}`);
     return responseData;
 };
+
 
 
 //  Retrieve user from Snipe-IT 
@@ -199,6 +212,8 @@ export const fetchUsersFromSnipeIT = async (reporterName) => {
 //  Checking out (assigning) Accessory to user in Snipe-IT
 export const checkoutAccessoryForUser = async (accessoryId, userId, issueUrl) => {
     logger.debug("Issue URL being used for note:", issueUrl);
+    logger.debug("Accessory ID to be used:", accessoryId);
+    logger.debug("User ID:", userId);
     let noteValue = typeof issueUrl === "string" ? issueUrl : issueUrl.issueUrl;
 
     const options = {

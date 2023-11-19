@@ -48,15 +48,15 @@ export const accessoriesSnipe = async (request) => {
         const issueUrl = jiraData.issueUrl;
         const locationName = jiraData.customfield_11213;
         const snipeITUser = await fetchSnipeITUser(jiraData.reporterEmail);
-        let locationMapping = await fetchLocations(process.env.SNIPE_TOKEN);
-        let companyMapping = await fetchCompanies(process.env.SNIPE_TOKEN);
+        let locationMapping = await fetchLocations(process.env.SNIPE_IT_TOKEN);
+        let companyMapping = await fetchCompanies(process.env.SNIPE_IT_TOKEN);
         let locationId = locationMapping[jiraData.customfield_11213];
         let companyId = companyMapping[jiraData.customfield_11337];
 
         // Check if location exists, if not, create a new one
         if (!locationId) {
             logger.warn(`Location "${locationName}" not found. Creating in Snipe-IT...`);
-            const newLocation = await createLocationInSnipeIT(locationName, process.env.SNIPE_TOKEN);
+            const newLocation = await createLocationInSnipeIT(locationName, process.env.SNIPE_IT_TOKEN);
             locationId = newLocation.id;
             locationMapping[locationName] = locationId;
         }
@@ -65,7 +65,7 @@ export const accessoriesSnipe = async (request) => {
         if (!companyId) {
             const companyName = jiraData.customfield_11337;
             logger.warn(`Company "${companyName}" not found. Creating in Snipe-IT...`);
-            const newCompany = await createCompanyInSnipeIT(companyName, process.env.SNIPE_TOKEN);
+            const newCompany = await createCompanyInSnipeIT(companyName, process.env.SNIPE_IT_TOKEN);
             companyId = newCompany.id;
             companyMapping[companyName] = companyId;
         }
@@ -76,6 +76,7 @@ export const accessoriesSnipe = async (request) => {
         await fetchAndLogUserAccessories(snipeITUser);
 
         for (const accessoryName of accessoryNames) {
+
             const accessory = await getExactAccessory(accessoryName, locationId, locationName);
 
             if (!accessory && jiraData.customfield_11745 !== 'New Accessory') {
@@ -87,14 +88,16 @@ export const accessoriesSnipe = async (request) => {
                 case 'Stock Accessory':
                     logger.debug(`Processing Stock Accessory: ${accessoryName}`);
                     await processStockAccessory(accessory, snipeITUser, jiraData, locationId, locationMapping, issueUrl, locationName);
+
                     break;
                 case 'New Accessory':
                     logger.debug(`Processing New Accessory: ${accessoryName}, existing: ${!!accessory}`);
-                    const isNewAccessoryProcessed = accessory
-                        ? await processNewAccessory(accessory, snipeITUser, jiraData, locationId, companyId, issueUrl, locationName)
-                        : await processNewAccessory(null, snipeITUser, jiraData, locationId, companyId, issueUrl, locationName);
-                    if (!isNewAccessoryProcessed) {
-                        logger.error(`Failed to process new accessory ${accessoryName}, isNewAccessoryProcessed: ${isNewAccessoryProcessed}`);
+                    const isProcessed = await processNewAccessory(
+                        accessoryName, snipeITUser, locationId, companyId, issueUrl, locationName
+                    );
+
+                    if (!isProcessed) {
+                        logger.error(`Failed to process new accessory ${accessoryName}, result: ${isProcessed}`);
                     }
                     break;
                 case '(DO NOT USE) Return Accessory':
@@ -108,17 +111,22 @@ export const accessoriesSnipe = async (request) => {
 
                     // Perform the check-in action
                     await checkinAccessory(accessoryToCheckIn.assigned_pivot_id);
-                    logger.info(`Accessory ${accessoryName} with pivot ID ${accessoryToCheckIn.assigned_pivot_id} successfully checked in.`);
 
-                    // Now convert the checked-in accessory to a sustainable accessory and update the stock
-                    try {
-                        const originalAccessoryName = accessoryName.replace(" (Sustainable)", ""); // Remove the suffix if it's there
-                        await convertToSustainableAndCheckIn(originalAccessoryName, locationId, locationName);
-                    } catch (error) {
-                        logger.error(`Failed to convert ${accessoryName} to sustainable: ${error}`);
-                        continue; // Skip to the next iteration if conversion to sustainable fails
+                    logger.debug(`Accessory ${accessoryName} with pivot ID ${accessoryToCheckIn.assigned_pivot_id} successfully checked in.`);
+
+                    // Check if the accessory is sustainable. If it is, do not increment the quantity.
+                    if (accessoryName.includes('(Sustainable)')) {
+                        logger.debug(`Checked in sustainable accessory without modifying the quantity: ${accessoryName}`);
+                    } else {
+                        // If it's not a sustainable accessory, proceed with the conversion
+                        try {
+                            await convertToSustainableAndCheckIn(accessoryName, locationId, locationName);
+                        } catch (error) {
+                            logger.error(`Failed to convert ${accessoryName} to sustainable: ${error}`);
+                        }
                     }
                     break;
+
                 default:
                     logger.error('Invalid accessory type in customfield_11745:', jiraData.customfield_11745);
                     continue; // Skip to the next iteration if the accessory type is invalid
