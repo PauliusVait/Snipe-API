@@ -100,7 +100,7 @@ export const accessoriesSnipe = async (request) => {
                         logger.error(`Failed to process new accessory ${accessoryName}, result: ${isProcessed}`);
                     }
                     break;
-                case '(DO NOT USE) Return Accessory':
+                case 'Return Accessory':
                     const checkedOutAccessoriesResponse = await fetchCheckedOutAccessoryUsers(accessory.id);
                     const accessoryToCheckIn = checkedOutAccessoriesResponse.rows.find(acc => acc.username === jiraData.reporterEmail);
 
